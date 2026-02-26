@@ -145,10 +145,35 @@ fi
 # 显示Banner
 show_banner
 
+# 交互式配置函数
+interactive_config() {
+    print_step "进入交互式配置模式 (直接回车保持默认):"
+    
+    read -p "请输入安装目录 [默认: ${APP_DIR}]: " input_dir
+    [ -n "$input_dir" ] && APP_DIR="$input_dir"
+    
+    read -p "请输入服务端口 [默认: ${APP_PORT}]: " input_port
+    [ -n "$input_port" ] && APP_PORT="$input_port"
+    
+    read -p "请输入访问域名 [默认: ${DOMAIN:-无}]: " input_domain
+    [ -n "$input_domain" ] && DOMAIN="$input_domain"
+    
+    read -p "请输入管理员账号 [默认: ${ADMIN_USER}]: " input_user
+    [ -n "$input_user" ] && ADMIN_USER="$input_user"
+    
+    read -p "请输入管理员密码 [默认: 自动生成]: " input_pass
+    [ -n "$input_pass" ] && ADMIN_PASS="$input_pass"
+}
+
 # 生成随机密码
 generate_password() {
     openssl rand -base64 12 | tr -d '/+=' | head -c 16
 }
+
+# 如果没有通过命令行参数提供域名，或者明确要求交互，则进入交互模式
+if [ -z "$DOMAIN" ]; then
+    interactive_config
+fi
 
 if [ -z "$ADMIN_PASS" ]; then
     ADMIN_PASS=$(generate_password)
@@ -161,16 +186,16 @@ generate_secret() {
 
 SECRET_KEY=$(generate_secret)
 
-print_step "配置信息:"
+print_step "最终配置预览:"
 echo "  - 安装目录: ${APP_DIR}"
 echo "  - 服务端口: ${APP_PORT}"
-echo "  - 域名: ${DOMAIN:-未设置}"
+echo "  - 域名: ${DOMAIN:-未设置 (将仅通过IP访问)}"
 echo "  - 管理员: ${ADMIN_USER}"
 echo "  - 密码: ${ADMIN_PASS}"
 echo "  - SSL: ${WITH_SSL}"
 echo ""
 
-read -p "确认以上配置? [Y/n]: " confirm
+read -p "确认开始部署? [Y/n]: " confirm
 if [[ ! "$confirm" =~ ^[Yy]|^$ ]]; then
     print_info "已取消安装"
     exit 0
@@ -190,12 +215,17 @@ else
 fi
 
 # 2. 安装系统依赖
-print_step "安装系统依赖..."
+print_step "安装系统依赖 (可能需要几分钟)..."
 if [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y python3 python3-pip python3-devel git nginx
-    # 检查是否安装supervisor
+    # 增加重试机制和超时设置
+    for i in {1..3}; do
+        dnf makecache && dnf install -y python3 python3-pip python3-devel git nginx && break
+        print_warn "DNF 安装失败，正在进行第 $i 次重试..."
+        sleep 5
+    done
+    
     if ! command -v supervisord &> /dev/null; then
-        dnf install -y supervisor || pip3 install supervisor
+        dnf install -y supervisor || pip3 install supervisor -i https://pypi.tuna.tsinghua.edu.cn/simple
     fi
 else
     apt update
@@ -205,27 +235,27 @@ fi
 # 3. 创建应用目录
 print_step "创建应用目录..."
 mkdir -p ${APP_DIR}
-mkdir -p ${APP_DIR}/data
-mkdir -p ${APP_DIR}/data/files
+mkdir -p ${APP_DIR}/instance
+mkdir -p ${APP_DIR}/files
 mkdir -p ${APP_DIR}/logs
 
 # 4. 复制项目文件
 print_step "复制项目文件..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 复制必要文件
-cp -r ${SCRIPT_DIR}/app ${APP_DIR}/
-cp ${SCRIPT_DIR}/run.py ${APP_DIR}/
+# 复制必要文件 (根据当前项目结构调整)
+cp ${SCRIPT_DIR}/app.py ${APP_DIR}/
 cp ${SCRIPT_DIR}/requirements.txt ${APP_DIR}/
+cp ${SCRIPT_DIR}/LICENSE ${APP_DIR}/ 2>/dev/null || true
 
 # 5. 创建虚拟环境并安装依赖
-print_step "创建Python虚拟环境..."
+print_step "创建Python虚拟环境并安装依赖 (使用清华镜像源)..."
 cd ${APP_DIR}
 python3 -m venv venv
 source venv/bin/activate
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
-pip install gunicorn -q
+pip install --upgrade pip -q -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install gunicorn -q -i https://pypi.tuna.tsinghua.edu.cn/simple
 deactivate
 
 # 6. 创建环境配置
@@ -237,11 +267,10 @@ SECRET_KEY=${SECRET_KEY}
 ADMIN_USERNAME=${ADMIN_USER}
 ADMIN_PASSWORD=${ADMIN_PASS}
 PORT=${APP_PORT}
-HOST=127.0.0.1
+HOST=0.0.0.0
 FILE_EXPIRE_MINUTES=20
-
-# 数据库配置 (默认SQLite，可切换MySQL)
-# DATABASE_URL=mysql+pymysql://user:password@localhost/dbname
+DATABASE_URL=sqlite:///instance/data.db
+UPLOAD_FOLDER=files
 EOF
 
 # 7. 创建 Systemd 服务
@@ -255,8 +284,9 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=${APP_DIR}
+EnvironmentFile=${APP_DIR}/.env
 Environment="PATH=${APP_DIR}/venv/bin"
-ExecStart=${APP_DIR}/venv/bin/gunicorn --workers 4 --threads 2 --bind 127.0.0.1:${APP_PORT} --timeout 120 --access-logfile ${APP_DIR}/logs/access.log --error-logfile ${APP_DIR}/logs/error.log 'run:app'
+ExecStart=${APP_DIR}/venv/bin/gunicorn --workers 4 --threads 2 --bind 0.0.0.0:${APP_PORT} --timeout 120 --access-logfile ${APP_DIR}/logs/access.log --error-logfile ${APP_DIR}/logs/error.log 'app:app'
 Restart=always
 RestartSec=10
 
