@@ -203,6 +203,30 @@ fi
 
 # 1. 检查系统
 print_step "检查系统环境..."
+
+# 内存检查与 SWAP 建议
+check_ram() {
+    local total_mem=$(free -m | grep Mem | awk '{print $2}')
+    local swap_mem=$(free -m | grep Swap | awk '{print $2}')
+    
+    print_info "当前可用物理内存: ${total_mem}MB"
+    
+    if [ "$total_mem" -lt 1024 ] && [ "$swap_mem" -lt 512 ]; then
+        print_warn "检测到系统内存不足 1GB 且未开启 SWAP，dnf 可能会被系统杀死 (OOM)。"
+        read -p "是否自动创建一个 2GB 的临时虚拟内存 (SWAP)? [Y/n]: " create_swap
+        if [[ "$create_swap" =~ ^[Yy]|^$ ]]; then
+            print_step "正在创建 SWAP 分区..."
+            dd if=/dev/zero of=/swapfile bs=1M count=2048
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            print_info "SWAP 分区已临时开启 (重启后失效)。"
+        fi
+    fi
+}
+
+check_ram
+
 if [ -f /etc/centos-release ] || [ -f /etc/rocky-release ] || [ -f /etc/almalinux-release ]; then
     PKG_MANAGER="dnf"
     print_info "检测到 RHEL/CentOS/Rocky Linux 系统"
@@ -216,16 +240,33 @@ fi
 
 # 2. 安装系统依赖
 print_step "安装系统依赖 (可能需要几分钟)..."
+
+# 检查是否已安装必要组件
+check_installed() {
+    if command -v python3 &>/dev/null && command -v nginx &>/dev/null && command -v git &>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+if check_installed; then
+    print_info "检测到系统已安装必要依赖，正在尝试增量安装..."
+fi
+
 if [ "$PKG_MANAGER" = "dnf" ]; then
-    # 增加重试机制和超时设置
+    # 增加内存限制优化
     for i in {1..3}; do
-        dnf makecache && dnf install -y python3 python3-pip python3-devel git nginx && break
-        print_warn "DNF 安装失败，正在进行第 $i 次重试..."
+        # 尝试清理缓存并跳过不必要的 makecache，dnf install 会自动处理
+        # 移除 dnf makecache，因为它最耗内存
+        dnf install -y python3 python3-pip python3-devel git nginx --setopt=install_weak_deps=False && break
+        print_warn "DNF 安装失败，正在进行第 $i 次重试 (将尝试清理缓存)..."
+        dnf clean all
         sleep 5
     done
     
     if ! command -v supervisord &> /dev/null; then
-        dnf install -y supervisor || pip3 install supervisor -i https://pypi.tuna.tsinghua.edu.cn/simple
+        dnf install -y supervisor --setopt=install_weak_deps=False || pip3 install supervisor -i https://pypi.tuna.tsinghua.edu.cn/simple
     fi
 else
     apt update
@@ -253,9 +294,9 @@ print_step "创建Python虚拟环境并安装依赖 (使用清华镜像源)..."
 cd ${APP_DIR}
 python3 -m venv venv
 source venv/bin/activate
-pip install --upgrade pip -q -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install gunicorn -q -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install --upgrade pip -q -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
+pip install gunicorn -q -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
 deactivate
 
 # 6. 创建环境配置
