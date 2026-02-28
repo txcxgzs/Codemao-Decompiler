@@ -135,9 +135,39 @@ if [ "$EUID" -ne 0 ]; then
     print_error "请使用root用户运行此脚本"
     exit 1
 fi
+
 # 显示Banner
 show_banner
-# 生成随机密码
+
+# 交互式配置
+print_info "请输入配置信息（直接回车使用默认值）:"
+echo ""
+
+# 询问域名
+read -p "访问域名（留空则使用IP访问）: " input_domain
+if [ -n "$input_domain" ]; then
+    DOMAIN="$input_domain"
+fi
+
+# 询问端口
+read -p "服务端口 [默认: 5000]: " input_port
+if [ -n "$input_port" ]; then
+    APP_PORT="$input_port"
+fi
+
+# 询问管理员用户名
+read -p "管理员用户名 [默认: admin]: " input_user
+if [ -n "$input_user" ]; then
+    ADMIN_USER="$input_user"
+fi
+
+# 询问管理员密码
+read -p "管理员密码 [默认: 随机生成]: " input_pass
+if [ -n "$input_pass" ]; then
+    ADMIN_PASS="$input_pass"
+fi
+
+# 生成随机密码（如果未设置）
 generate_password() {
     openssl rand -base64 12 | tr -d '/+=' | head -c 16
 }
@@ -145,15 +175,19 @@ generate_password() {
 if [ -z "$ADMIN_PASS" ]; then
     ADMIN_PASS=$(generate_password)
 fi
+
 # 生成密钥
 generate_secret() {
     openssl rand -hex 32
 }
 SECRET_KEY=$(generate_secret)
+
+# 显示配置确认
+echo ""
 print_info "配置信息:"
 echo "  - 安装目录: ${APP_DIR}"
 echo "  - 服务端口: ${APP_PORT}"
-echo "  - 域名: ${DOMAIN:-未设置}"
+echo "  - 域名: ${DOMAIN:-未设置（使用IP访问）}"
 echo "  - 管理员: ${ADMIN_USER}"
 echo "  - 密码: ${ADMIN_PASS}"
 echo ""
