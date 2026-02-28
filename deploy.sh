@@ -53,7 +53,8 @@ show_help() {
 
 # 默认配置
 APP_NAME="codemao-decompiler"
-APP_DIR="/opt/${APP_NAME}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="${SCRIPT_DIR}"
 APP_PORT=5000
 DOMAIN=""
 ADMIN_USER="admin"
@@ -281,27 +282,12 @@ else
     fi
 fi
 
-# 3. 创建应用目录
-print_step "创建应用目录..."
-mkdir -p ${APP_DIR}
+# 3. 创建必要目录
+print_step "创建必要目录..."
 mkdir -p ${APP_DIR}/files
 mkdir -p ${APP_DIR}/logs
 
-# 4. 复制项目文件
-print_step "复制项目文件..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# 如果脚本所在目录就是安装目录，则跳过复制，避免 cp 同一文件错误
-if [ "$SCRIPT_DIR" == "$APP_DIR" ]; then
-    print_info "当前已在目标目录中，跳过文件复制。"
-else
-    # 复制必要文件 (根据当前项目结构调整)
-    cp ${SCRIPT_DIR}/app.py ${APP_DIR}/
-    cp ${SCRIPT_DIR}/requirements.txt ${APP_DIR}/
-    cp ${SCRIPT_DIR}/LICENSE ${APP_DIR}/ 2>/dev/null || true
-fi
-
-# 5. 创建虚拟环境并安装依赖
+# 4. 创建虚拟环境并安装依赖
 print_step "创建Python虚拟环境并安装依赖 (使用清华镜像源)..."
 cd ${APP_DIR}
 python3 -m venv venv
@@ -311,7 +297,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --no
 pip install gunicorn -q -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
 deactivate
 
-# 6. 创建环境配置
+# 5. 创建环境配置
 print_step "创建环境配置..."
 cat > ${APP_DIR}/.env << EOF
 # 生产环境配置
@@ -326,7 +312,7 @@ DATABASE_URL=sqlite:///data.db
 UPLOAD_FOLDER=files
 EOF
 
-# 7. 创建 Systemd 服务
+# 6. 创建 Systemd 服务
 print_step "创建 Systemd 服务..."
 cat > /etc/systemd/system/${APP_NAME}.service << EOF
 [Unit]
@@ -347,7 +333,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# 8. 创建 Nginx 配置
+# 7. 创建 Nginx 配置
 print_step "创建 Nginx 配置..."
 if [ -n "${DOMAIN}" ]; then
     cat > /etc/nginx/conf.d/${APP_NAME}.conf << EOF
@@ -403,7 +389,7 @@ else
     print_warn "未设置域名，跳过 Nginx 配置"
 fi
 
-# 9. 设置权限
+# 8. 设置权限
 print_step "设置文件权限..."
 chown -R root:root ${APP_DIR}
 chmod -R 755 ${APP_DIR}
@@ -411,7 +397,7 @@ chmod -R 777 ${APP_DIR}/data
 chmod -R 777 ${APP_DIR}/logs
 chmod 600 ${APP_DIR}/.env
 
-# 10. 启动服务
+# 9. 启动服务
 print_step "启动服务..."
 systemctl daemon-reload
 systemctl enable ${APP_NAME}
@@ -433,7 +419,7 @@ if [ -n "${DOMAIN}" ]; then
     fi
 fi
 
-# 11. 配置防火墙
+# 10. 配置防火墙
 print_step "配置防火墙..."
 if command -v firewall-cmd &> /dev/null; then
     firewall-cmd --permanent --add-service=http 2>/dev/null || true
@@ -441,7 +427,7 @@ if command -v firewall-cmd &> /dev/null; then
     firewall-cmd --reload 2>/dev/null || true
 fi
 
-# 12. 显示结果
+# 11. 显示结果
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║${NC}                   部署完成!                                ${GREEN}║${NC}"
