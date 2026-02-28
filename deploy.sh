@@ -393,7 +393,7 @@ fi
 print_step "设置文件权限..."
 chown -R root:root ${APP_DIR}
 chmod -R 755 ${APP_DIR}
-chmod -R 777 ${APP_DIR}/data
+chmod -R 777 ${APP_DIR}/files
 chmod -R 777 ${APP_DIR}/logs
 chmod 600 ${APP_DIR}/.env
 
