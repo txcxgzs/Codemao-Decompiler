@@ -1,8 +1,8 @@
 #!/bin/bash
 # ====================================
 # Codemao Decompiler 一键部署脚本
-# 适用于 CentOS 9 / Rocky Linux 9
-# 支持宝塔面板环境
+# 适用于 Ubuntu / Debian / CentOS / Rocky Linux
+# 自动检测当前目录作为安装目录
 # ====================================
 
 set -e
@@ -25,7 +25,6 @@ show_banner() {
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║${NC}         编程猫作品反编译器 - 一键部署脚本                  ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}         Codemao Decompiler Auto Deployer                    ${GREEN}║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -39,13 +38,12 @@ show_help() {
     echo "  -p, --port <端口>        设置服务端口 (默认: 5000)"
     echo "  -u, --user <用户名>      设置管理员用户名 (默认: admin)"
     echo "  -w, --password <密码>    设置管理员密码 (默认: 随机生成)"
-    echo "  --app-dir <目录>         设置安装目录 (默认: /opt/codemao-decompiler)"
     echo "  --with-ssl               自动配置SSL证书 (需要域名)"
     echo "  --uninstall              卸载服务"
     echo "  -h, --help               显示帮助信息"
     echo ""
     echo "示例:"
-    echo "  $0 -d example.com -u admin -w mypassword"
+    echo "  $0 -d example.com"
     echo "  $0 -d example.com --with-ssl"
     echo "  $0 --uninstall"
     exit 0
@@ -81,10 +79,6 @@ while [[ $# -gt 0 ]]; do
             ADMIN_PASS="$2"
             shift 2
             ;;
-        --app-dir)
-            APP_DIR="$2"
-            shift 2
-            ;;
         --with-ssl)
             WITH_SSL=true
             shift
@@ -113,8 +107,7 @@ uninstall() {
     
     # 删除服务文件
     rm -f /etc/systemd/system/${APP_NAME}.service
-    rm -f /etc/nginx/conf.d/${APP_NAME}.conf
-    rm -f /etc/supervisord.d/${APP_NAME}.ini 2>/dev/null || true
+    rm -f /etc/nginx/conf.d/${APP_NAME}.conf 2>/dev/null || true
     
     # 重载systemd
     systemctl daemon-reload
@@ -142,100 +135,36 @@ if [ "$EUID" -ne 0 ]; then
     print_error "请使用root用户运行此脚本"
     exit 1
 fi
-
-# 内存检查与 SWAP 预处理 (必须在所有安装操作之前)
-check_ram_pre() {
-    # 获取可用内存 (Available)
-    local available_mem=$(free -m | awk '/^Mem:/{print $7}')
-    [ -z "$available_mem" ] && available_mem=$(free -m | awk '/^Mem:/{print $4 + $6}')
-    
-    local swap_total=$(free -m | awk '/^Swap:/{print $2}')
-    
-    print_step "系统资源检查:"
-    print_info "系统可用物理内存: ${available_mem}MB"
-    print_info "当前 SWAP 分区: ${swap_total}MB"
-    
-    # 如果物理内存极低且没有 SWAP，优先处理 SWAP
-    if [ "$available_mem" -lt 800 ] && [ "$swap_total" -lt 512 ]; then
-        print_warn "检测到您的服务器内存非常紧张，且未开启虚拟内存 (SWAP)。"
-        print_warn "这会导致安装过程中系统强制杀死进程 (Killed)。"
-        read -p "是否立即创建 2GB 虚拟内存以保证安装成功? [Y/n]: " create_swap
-        if [[ "$create_swap" =~ ^[Yy]|^$ ]]; then
-            print_step "正在紧急创建 SWAP 分区..."
-            # 停止可能占用内存的进程(可选，但这里不做，以免误杀用户进程)
-            dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
-            chmod 600 /swapfile
-            mkswap /swapfile
-            swapon /swapfile
-            print_info "SWAP 分区已启用，安装环境已加固。"
-        fi
-    fi
-}
-
-check_ram_pre
-
 # 显示Banner
 show_banner
-
-# 交互式配置函数
-interactive_config() {
-    print_step "进入交互式配置模式 (直接回车保持默认):"
-    
-    read -p "请输入安装目录 [默认: ${APP_DIR}]: " input_dir
-    [ -n "$input_dir" ] && APP_DIR="$input_dir"
-    
-    read -p "请输入服务端口 [默认: ${APP_PORT}]: " input_port
-    [ -n "$input_port" ] && APP_PORT="$input_port"
-    
-    read -p "请输入访问域名 [默认: ${DOMAIN:-无}]: " input_domain
-    [ -n "$input_domain" ] && DOMAIN="$input_domain"
-    
-    read -p "请输入管理员账号 [默认: ${ADMIN_USER}]: " input_user
-    [ -n "$input_user" ] && ADMIN_USER="$input_user"
-    
-    read -p "请输入管理员密码 [默认: 自动生成]: " input_pass
-    [ -n "$input_pass" ] && ADMIN_PASS="$input_pass"
-}
-
 # 生成随机密码
 generate_password() {
     openssl rand -base64 12 | tr -d '/+=' | head -c 16
 }
 
-# 如果没有通过命令行参数提供域名，或者明确要求交互，则进入交互模式
-if [ -z "$DOMAIN" ]; then
-    interactive_config
-fi
-
 if [ -z "$ADMIN_PASS" ]; then
     ADMIN_PASS=$(generate_password)
 fi
-
 # 生成密钥
 generate_secret() {
     openssl rand -hex 32
 }
-
 SECRET_KEY=$(generate_secret)
-
-print_step "最终配置预览:"
+print_info "配置信息:"
 echo "  - 安装目录: ${APP_DIR}"
 echo "  - 服务端口: ${APP_PORT}"
-echo "  - 域名: ${DOMAIN:-未设置 (将仅通过IP访问)}"
+echo "  - 域名: ${DOMAIN:-未设置}"
 echo "  - 管理员: ${ADMIN_USER}"
 echo "  - 密码: ${ADMIN_PASS}"
-echo "  - SSL: ${WITH_SSL}"
 echo ""
 
-read -p "确认开始部署? [Y/n]: " confirm
+read -p "确认以上配置? [Y/n]: " confirm
 if [[ ! "$confirm" =~ ^[Yy]|^$ ]]; then
     print_info "已取消安装"
     exit 0
 fi
-
 # 1. 检查系统
 print_step "检查系统环境..."
-
 if [ -f /etc/centos-release ] || [ -f /etc/rocky-release ] || [ -f /etc/almalinux-release ]; then
     PKG_MANAGER="dnf"
     print_info "检测到 RHEL/CentOS/Rocky Linux 系统"
@@ -244,59 +173,29 @@ elif [ -f /etc/debian_version ]; then
     print_info "检测到 Debian/Ubuntu 系统"
 else
     print_warn "未检测到支持的系统，尝试继续安装..."
-    PKG_MANAGER="dnf"
+    PKG_MANAGER="apt"
 fi
-
 # 2. 安装系统依赖
-print_step "安装系统依赖 (可能需要几分钟)..."
-
-# 检查是否已安装必要组件
-check_installed() {
-    if command -v python3 &>/dev/null && command -v nginx &>/dev/null && command -v git &>/dev/null; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-if check_installed; then
-    print_info "检测到系统已预装必要依赖，跳过包管理器更新以节省内存。"
+print_step "安装系统依赖..."
+if [ "$PKG_MANAGER" = "dnf" ]; then
+    dnf install -y python3 python3-pip python3-venv git nginx -q
 else
-    if [ "$PKG_MANAGER" = "dnf" ]; then
-        # 增加内存限制优化
-        for i in {1..3}; do
-            print_info "正在通过 DNF 安装依赖 (尝试次数: $i)..."
-            # 彻底静默，减少输出导致的内存压力
-            dnf install -y python3 python3-pip python3-devel git nginx --setopt=install_weak_deps=False --nodocs -q && break
-            print_warn "DNF 安装遇到问题，正在清理重试..."
-            dnf clean all -q
-            sleep 5
-        done
-        
-        if ! command -v supervisord &> /dev/null; then
-            dnf install -y supervisor --setopt=install_weak_deps=False --nodocs -q || pip3 install supervisor -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir -q
-        fi
-    else
-        apt update -qq
-        apt install -y python3 python3-pip python3-venv git nginx supervisor -qq
-    fi
+    apt update -qq
+    apt install -y python3 python3-pip python3-venv git nginx supervisor -qq
 fi
-
 # 3. 创建必要目录
 print_step "创建必要目录..."
 mkdir -p ${APP_DIR}/files
 mkdir -p ${APP_DIR}/logs
-
 # 4. 创建虚拟环境并安装依赖
-print_step "创建Python虚拟环境并安装依赖 (使用清华镜像源)..."
+print_step "创建Python虚拟环境并安装依赖..."
 cd ${APP_DIR}
 python3 -m venv venv
 source venv/bin/activate
-pip install --upgrade pip -q -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
-pip install gunicorn -q -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir
+pip install --upgrade pip -q
+pip install -r requirements.txt -q
+pip install gunicorn -q
 deactivate
-
 # 5. 创建环境配置
 print_step "创建环境配置..."
 cat > ${APP_DIR}/.env << EOF
@@ -311,7 +210,6 @@ FILE_EXPIRE_MINUTES=20
 DATABASE_URL=sqlite:///data.db
 UPLOAD_FOLDER=files
 EOF
-
 # 6. 创建 Systemd 服务
 print_step "创建 Systemd 服务..."
 cat > /etc/systemd/system/${APP_NAME}.service << EOF
@@ -325,14 +223,12 @@ User=root
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
 Environment="PATH=${APP_DIR}/venv/bin"
-ExecStart=${APP_DIR}/venv/bin/gunicorn --workers 4 --threads 2 --bind 0.0.0.0:${APP_PORT} --timeout 120 --access-logfile ${APP_DIR}/logs/access.log --error-logfile ${APP_DIR}/logs/error.log 'app:app'
+ExecStart=${APP_DIR}/venv/bin/gunicorn --workers 4 --threads 2 --bind 0.0.0.0:${APP_PORT} --timeout 120 --access-logfile ${APP_DIR}/logs/access.log --error-logfile ${APP_DIR}/logs/error.log --capture-output --log-level info app:app
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
 # 7. 创建 Nginx 配置
 print_step "创建 Nginx 配置..."
 if [ -n "${DOMAIN}" ]; then
@@ -341,7 +237,6 @@ upstream ${APP_NAME} {
     server 127.0.0.1:${APP_PORT};
     keepalive 32;
 }
-
 server {
     listen 80;
     server_name ${DOMAIN};
@@ -351,16 +246,11 @@ server {
     
     client_max_body_size 50M;
     
-    # 安全头
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     
-    # 限流
-    limit_req_zone \$binary_remote_addr zone=api_limit:10m rate=10r/s;
-    
     location / {
-        limit_req zone=api_limit burst=20 nodelay;
         proxy_pass http://${APP_NAME};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -376,19 +266,12 @@ server {
         expires 30d;
         add_header Cache-Control "public, immutable";
     }
-    
-    # 健康检查
-    location /health {
-        access_log off;
-        return 200 "OK";
-        add_header Content-Type text/plain;
-    }
 }
 EOF
+    print_info "Nginx 配置已创建"
 else
     print_warn "未设置域名，跳过 Nginx 配置"
 fi
-
 # 8. 设置权限
 print_step "设置文件权限..."
 chown -R root:root ${APP_DIR}
@@ -396,29 +279,20 @@ chmod -R 755 ${APP_DIR}
 chmod -R 777 ${APP_DIR}/files
 chmod -R 777 ${APP_DIR}/logs
 chmod 600 ${APP_DIR}/.env
-
 # 9. 启动服务
 print_step "启动服务..."
 systemctl daemon-reload
 systemctl enable ${APP_NAME}
 systemctl start ${APP_NAME}
-
-if [ -n "${DOMAIN}" ]; then
-    systemctl enable nginx
-    systemctl restart nginx
-    
-    # SSL配置
-    if [ "$WITH_SSL" = true ]; then
-        print_step "配置SSL证书..."
-        if command -v certbot &> /dev/null; then
-            certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --register-unsafely-without-email || \
-                print_warn "SSL证书配置失败，请手动配置"
-        else
-            print_warn "未安装certbot，跳过SSL配置"
-        fi
-    fi
+# 检查服务是否启动成功
+sleep 3
+if systemctl is-active --quiet ${APP_NAME}; then
+    print_info "服务启动成功"
+else
+    print_error "服务启动失败，查看日志:"
+    journalctl -u ${APP_NAME} -n 50 --no-pager
+    exit 1
 fi
-
 # 10. 配置防火墙
 print_step "配置防火墙..."
 if command -v firewall-cmd &> /dev/null; then
@@ -426,14 +300,12 @@ if command -v firewall-cmd &> /dev/null; then
     firewall-cmd --permanent --add-service=https 2>/dev/null || true
     firewall-cmd --reload 2>/dev/null || true
 fi
-
 # 11. 显示结果
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║${NC}                   部署完成!                                ${GREEN}║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-
 if [ -n "${DOMAIN}" ]; then
     echo -e "  访问地址: ${GREEN}http://${DOMAIN}${NC}"
     echo -e "  后台管理: ${GREEN}http://${DOMAIN}/admin${NC}"
@@ -441,7 +313,6 @@ else
     echo -e "  访问地址: ${GREEN}http://服务器IP:${APP_PORT}${NC}"
     echo -e "  后台管理: ${GREEN}http://服务器IP:${APP_PORT}/admin${NC}"
 fi
-
 echo ""
 echo -e "  管理员账号: ${YELLOW}${ADMIN_USER}${NC}"
 echo -e "  管理员密码: ${YELLOW}${ADMIN_PASS}${NC}"
@@ -453,6 +324,5 @@ echo -e "${YELLOW}常用命令:${NC}"
 echo "  查看状态: systemctl status ${APP_NAME}"
 echo "  重启服务: systemctl restart ${APP_NAME}"
 echo "  查看日志: tail -f ${APP_DIR}/logs/error.log"
-echo "  查看访问: tail -f ${APP_DIR}/logs/access.log"
 echo ""
-print_warn "请妥善保存管理员密码，并建议修改默认配置!"
+print_warn "请妥善保存管理员密码!"
