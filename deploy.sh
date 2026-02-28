@@ -34,11 +34,10 @@ show_help() {
     echo "用法: $0 [选项]"
     echo ""
     echo "选项:"
-    echo "  -d, --domain <域名>      设置访问域名"
     echo "  -p, --port <端口>        设置服务端口 (默认: 5000)"
     echo "  -u, --user <用户名>      设置管理员用户名 (默认: admin)"
     echo "  -w, --password <密码>    设置管理员密码 (默认: 随机生成)"
-    echo "  --with-ssl               自动配置SSL证书 (需要域名)"
+    echo "  --public                 对外开放端口（默认只监听内部）"
     echo "  --uninstall              卸载服务"
     echo "  -h, --help               显示帮助信息"
     exit 0
@@ -49,20 +48,18 @@ APP_NAME="codemao-decompiler"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SCRIPT_DIR}"
 APP_PORT=5000
-DOMAIN=""
 ADMIN_USER="admin"
 ADMIN_PASS=""
-WITH_SSL=false
+PUBLIC_ACCESS=false
 UNINSTALL=false
 
 # 解析参数
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -d|--domain) DOMAIN="$2"; shift 2 ;;
         -p|--port) APP_PORT="$2"; shift 2 ;;
         -u|--user) ADMIN_USER="$2"; shift 2 ;;
         -w|--password) ADMIN_PASS="$2"; shift 2 ;;
-        --with-ssl) WITH_SSL=true; shift ;;
+        --public) PUBLIC_ACCESS=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
         -h|--help) show_help ;;
         *) print_error "未知参数: $1"; show_help ;;
@@ -75,7 +72,6 @@ uninstall() {
     systemctl stop ${APP_NAME} 2>/dev/null || true
     systemctl disable ${APP_NAME} 2>/dev/null || true
     rm -f /etc/systemd/system/${APP_NAME}.service
-    rm -f /etc/nginx/conf.d/${APP_NAME}.conf 2>/dev/null || true
     systemctl daemon-reload
     print_info "卸载完成"
     exit 0
@@ -98,11 +94,6 @@ show_banner
 print_info "请输入配置信息（直接回车使用默认值）:"
 echo ""
 
-read -p "访问域名（留空则使用IP访问）: " input_domain
-if [ -n "$input_domain" ]; then
-    DOMAIN="$input_domain"
-fi
-
 read -p "服务端口 [默认: 5000]: " input_port
 if [ -n "$input_port" ]; then
     APP_PORT="$input_port"
@@ -118,6 +109,11 @@ if [ -n "$input_pass" ]; then
     ADMIN_PASS="$input_pass"
 fi
 
+read -p "是否对外开放端口？[y/N，默认只监听内部127.0.0.1]: " input_public
+if [[ "$input_public" =~ ^[Yy]$ ]]; then
+    PUBLIC_ACCESS=true
+fi
+
 # 生成随机密码
 if [ -z "$ADMIN_PASS" ]; then
     ADMIN_PASS=$(openssl rand -base64 12 | tr -d '/+=' | head -c 16)
@@ -126,12 +122,21 @@ fi
 # 生成密钥
 SECRET_KEY=$(openssl rand -hex 32)
 
+# 确定监听地址
+if [ "$PUBLIC_ACCESS" = true ]; then
+    BIND_ADDRESS="0.0.0.0"
+    ACCESS_INFO="对外开放（0.0.0.0:${APP_PORT}）"
+else
+    BIND_ADDRESS="127.0.0.1"
+    ACCESS_INFO="仅内部访问（127.0.0.1:${APP_PORT}）"
+fi
+
 # 显示配置确认
 echo ""
 print_info "配置信息:"
 echo "  - 安装目录: ${APP_DIR}"
-echo "  - 服务端口: ${APP_PORT} (仅内部访问)"
-echo "  - 域名: ${DOMAIN:-未设置（使用IP访问）}"
+echo "  - 服务端口: ${APP_PORT}"
+echo "  - 访问方式: ${ACCESS_INFO}"
 echo "  - 管理员: ${ADMIN_USER}"
 echo "  - 密码: ${ADMIN_PASS}"
 echo ""
@@ -158,10 +163,10 @@ fi
 # 2. 安装系统依赖
 print_step "安装系统依赖..."
 if [ "$PKG_MANAGER" = "dnf" ]; then
-    dnf install -y python3 python3-pip python3-venv git nginx -q
+    dnf install -y python3 python3-pip python3-venv git -q
 else
     apt update -qq
-    apt install -y python3 python3-pip python3-venv git nginx -qq
+    apt install -y python3 python3-pip python3-venv git -qq
 fi
 
 # 3. 创建必要目录
@@ -187,13 +192,13 @@ SECRET_KEY=${SECRET_KEY}
 ADMIN_USERNAME=${ADMIN_USER}
 ADMIN_PASSWORD=${ADMIN_PASS}
 PORT=${APP_PORT}
-HOST=127.0.0.1
+HOST=${BIND_ADDRESS}
 FILE_EXPIRE_MINUTES=20
 DATABASE_URL=sqlite:///data.db
 UPLOAD_FOLDER=files
 EOF
 
-# 6. 创建 Systemd 服务（只监听内部IP）
+# 6. 创建 Systemd 服务
 print_step "创建 Systemd 服务..."
 cat > /etc/systemd/system/${APP_NAME}.service << EOF
 [Unit]
@@ -206,7 +211,7 @@ User=root
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
 Environment="PATH=${APP_DIR}/venv/bin"
-ExecStart=${APP_DIR}/venv/bin/gunicorn --workers 4 --threads 2 --bind 127.0.0.1:${APP_PORT} --timeout 120 --access-logfile ${APP_DIR}/logs/access.log --error-logfile ${APP_DIR}/logs/error.log --capture-output --log-level info app:app
+ExecStart=${APP_DIR}/venv/bin/gunicorn --workers 4 --threads 2 --bind ${BIND_ADDRESS}:${APP_PORT} --timeout 120 --access-logfile ${APP_DIR}/logs/access.log --error-logfile ${APP_DIR}/logs/error.log --capture-output --log-level info app:app
 Restart=always
 RestartSec=10
 
@@ -214,46 +219,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# 7. 创建 Nginx 反向代理配置
-print_step "创建 Nginx 反向代理配置..."
-if [ -n "${DOMAIN}" ]; then
-    SERVER_NAME="${DOMAIN}"
-else
-    SERVER_NAME="_"
-fi
-
-cat > /etc/nginx/conf.d/${APP_NAME}.conf << EOF
-server {
-    listen 80;
-    server_name ${SERVER_NAME};
-    
-    access_log ${APP_DIR}/logs/nginx_access.log;
-    error_log ${APP_DIR}/logs/nginx_error.log;
-    
-    client_max_body_size 50M;
-    
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    
-    location / {
-        proxy_pass http://127.0.0.1:${APP_PORT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-EOF
-
-# 测试并重载 Nginx
-nginx -t && systemctl reload nginx
-print_info "Nginx 反向代理配置完成"
-
-# 8. 设置权限
+# 7. 设置权限
 print_step "设置文件权限..."
 chown -R root:root ${APP_DIR}
 chmod -R 755 ${APP_DIR}
@@ -261,7 +227,7 @@ chmod -R 777 ${APP_DIR}/files
 chmod -R 777 ${APP_DIR}/logs
 chmod 600 ${APP_DIR}/.env
 
-# 9. 启动服务
+# 8. 启动服务
 print_step "启动服务..."
 systemctl daemon-reload
 systemctl enable ${APP_NAME}
@@ -277,26 +243,27 @@ else
     exit 1
 fi
 
-# 10. 显示结果
+# 9. 显示结果
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║${NC}                   部署完成!                                ${GREEN}║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-if [ -n "${DOMAIN}" ]; then
-    echo -e "  访问地址: ${GREEN}http://${DOMAIN}${NC}"
-    echo -e "  后台管理: ${GREEN}http://${DOMAIN}/admin${NC}"
+if [ "$PUBLIC_ACCESS" = true ]; then
+    echo -e "  访问地址: ${GREEN}http://服务器IP:${APP_PORT}${NC}"
+    echo -e "  后台管理: ${GREEN}http://服务器IP:${APP_PORT}/admin${NC}"
 else
-    echo -e "  访问地址: ${GREEN}http://服务器IP${NC} (通过 Nginx 代理)"
-    echo -e "  后台管理: ${GREEN}http://服务器IP/admin${NC}"
+    echo -e "  服务地址: ${YELLOW}http://127.0.0.1:${APP_PORT}${NC}（仅内部访问）"
+    echo ""
+    print_info "请在宝塔面板中配置反向代理:"
+    echo "  目标URL: http://127.0.0.1:${APP_PORT}"
+    echo "  发送域名: \$host"
 fi
 
 echo ""
 echo -e "  管理员账号: ${YELLOW}${ADMIN_USER}${NC}"
 echo -e "  管理员密码: ${YELLOW}${ADMIN_PASS}${NC}"
-echo ""
-echo -e "  服务只监听内部 127.0.0.1:${APP_PORT}，通过 Nginx 反向代理对外访问"
 echo ""
 echo -e "${YELLOW}常用命令:${NC}"
 echo "  查看状态: systemctl status ${APP_NAME}"
