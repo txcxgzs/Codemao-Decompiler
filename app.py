@@ -47,13 +47,17 @@ from flask import Flask, request, jsonify, send_file, session
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 # ==================== 配置 ====================
 
 app = Flask(__name__)
-CORS(app)  # 允许跨域调用
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///instance/data.db')
+CORS(app)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///data.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', 'files')
 app.config['FILE_EXPIRE_MINUTES'] = int(os.environ.get('FILE_EXPIRE_MINUTES', 20))
@@ -62,7 +66,6 @@ app.config['ADMIN_PASSWORD'] = os.environ.get('ADMIN_PASSWORD', 'admin123')
 
 db = SQLAlchemy(app)
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs('instance', exist_ok=True)
 
 
 # ==================== HTML模板 ====================
@@ -1573,7 +1576,19 @@ def api_download(rid):
         rec.file_path = None; db.session.commit()
         return jsonify({'success': False, 'error': '文件已过期'}), 410
     rec.download_count += 1; db.session.commit()
-    return send_file(rec.file_path, as_attachment=True, download_name=f"{rec.work_name or rec.work_id}{os.path.splitext(rec.file_path)[1]}", mimetype='application/json')
+    
+    # 动态确定文件名和MIME类型
+    filename = f"{rec.work_name or rec.work_id}"
+    # 过滤掉文件名中的非法字符
+    filename = "".join(c for c in filename if c.isalnum() or c in (' ', '.', '_')).strip()
+    ext = os.path.splitext(rec.file_path)[1]
+    
+    return send_file(
+        rec.file_path, 
+        as_attachment=True, 
+        download_name=f"{filename}{ext}",
+        mimetype='application/json' if ext == '.json' else 'application/octet-stream'
+    )
 
 @app.route('/api/admin/login', methods=['POST'])
 def admin_login():
@@ -1706,12 +1721,13 @@ with app.app_context():
     cleanup_thread.start()
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
     print(f"""
 ╔════════════════════════════════════════════════════════════╗
 ║         编程猫作品反编译服务已启动                          ║
 ╠════════════════════════════════════════════════════════════╣
-║  访问地址: http://localhost:5000
-║  后台管理: http://localhost:5000/admin
+║  访问地址: http://localhost:{port}
+║  后台管理: http://localhost:{port}/admin
 ╚════════════════════════════════════════════════════════════╝
     """)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_DEBUG', 'False').lower() == 'true')

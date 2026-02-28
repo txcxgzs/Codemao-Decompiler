@@ -142,6 +142,37 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# 内存检查与 SWAP 预处理 (必须在所有安装操作之前)
+check_ram_pre() {
+    # 获取可用内存 (Available)
+    local available_mem=$(free -m | awk '/^Mem:/{print $7}')
+    [ -z "$available_mem" ] && available_mem=$(free -m | awk '/^Mem:/{print $4 + $6}')
+    
+    local swap_total=$(free -m | awk '/^Swap:/{print $2}')
+    
+    print_step "系统资源检查:"
+    print_info "系统可用物理内存: ${available_mem}MB"
+    print_info "当前 SWAP 分区: ${swap_total}MB"
+    
+    # 如果物理内存极低且没有 SWAP，优先处理 SWAP
+    if [ "$available_mem" -lt 800 ] && [ "$swap_total" -lt 512 ]; then
+        print_warn "检测到您的服务器内存非常紧张，且未开启虚拟内存 (SWAP)。"
+        print_warn "这会导致安装过程中系统强制杀死进程 (Killed)。"
+        read -p "是否立即创建 2GB 虚拟内存以保证安装成功? [Y/n]: " create_swap
+        if [[ "$create_swap" =~ ^[Yy]|^$ ]]; then
+            print_step "正在紧急创建 SWAP 分区..."
+            # 停止可能占用内存的进程(可选，但这里不做，以免误杀用户进程)
+            dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            print_info "SWAP 分区已启用，安装环境已加固。"
+        fi
+    fi
+}
+
+check_ram_pre
+
 # 显示Banner
 show_banner
 
@@ -204,29 +235,6 @@ fi
 # 1. 检查系统
 print_step "检查系统环境..."
 
-# 内存检查与 SWAP 建议
-check_ram() {
-    local total_mem=$(free -m | grep Mem | awk '{print $2}')
-    local swap_mem=$(free -m | grep Swap | awk '{print $2}')
-    
-    print_info "当前可用物理内存: ${total_mem}MB"
-    
-    if [ "$total_mem" -lt 1024 ] && [ "$swap_mem" -lt 512 ]; then
-        print_warn "检测到系统内存不足 1GB 且未开启 SWAP，dnf 可能会被系统杀死 (OOM)。"
-        read -p "是否自动创建一个 2GB 的临时虚拟内存 (SWAP)? [Y/n]: " create_swap
-        if [[ "$create_swap" =~ ^[Yy]|^$ ]]; then
-            print_step "正在创建 SWAP 分区..."
-            dd if=/dev/zero of=/swapfile bs=1M count=2048
-            chmod 600 /swapfile
-            mkswap /swapfile
-            swapon /swapfile
-            print_info "SWAP 分区已临时开启 (重启后失效)。"
-        fi
-    fi
-}
-
-check_ram
-
 if [ -f /etc/centos-release ] || [ -f /etc/rocky-release ] || [ -f /etc/almalinux-release ]; then
     PKG_MANAGER="dnf"
     print_info "检测到 RHEL/CentOS/Rocky Linux 系统"
@@ -251,32 +259,31 @@ check_installed() {
 }
 
 if check_installed; then
-    print_info "检测到系统已安装必要依赖，正在尝试增量安装..."
-fi
-
-if [ "$PKG_MANAGER" = "dnf" ]; then
-    # 增加内存限制优化
-    for i in {1..3}; do
-        # 尝试清理缓存并跳过不必要的 makecache，dnf install 会自动处理
-        # 移除 dnf makecache，因为它最耗内存
-        dnf install -y python3 python3-pip python3-devel git nginx --setopt=install_weak_deps=False && break
-        print_warn "DNF 安装失败，正在进行第 $i 次重试 (将尝试清理缓存)..."
-        dnf clean all
-        sleep 5
-    done
-    
-    if ! command -v supervisord &> /dev/null; then
-        dnf install -y supervisor --setopt=install_weak_deps=False || pip3 install supervisor -i https://pypi.tuna.tsinghua.edu.cn/simple
-    fi
+    print_info "检测到系统已预装必要依赖，跳过包管理器更新以节省内存。"
 else
-    apt update
-    apt install -y python3 python3-pip python3-venv git nginx supervisor
+    if [ "$PKG_MANAGER" = "dnf" ]; then
+        # 增加内存限制优化
+        for i in {1..3}; do
+            print_info "正在通过 DNF 安装依赖 (尝试次数: $i)..."
+            # 彻底静默，减少输出导致的内存压力
+            dnf install -y python3 python3-pip python3-devel git nginx --setopt=install_weak_deps=False --nodocs -q && break
+            print_warn "DNF 安装遇到问题，正在清理重试..."
+            dnf clean all -q
+            sleep 5
+        done
+        
+        if ! command -v supervisord &> /dev/null; then
+            dnf install -y supervisor --setopt=install_weak_deps=False --nodocs -q || pip3 install supervisor -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir -q
+        fi
+    else
+        apt update -qq
+        apt install -y python3 python3-pip python3-venv git nginx supervisor -qq
+    fi
 fi
 
 # 3. 创建应用目录
 print_step "创建应用目录..."
 mkdir -p ${APP_DIR}
-mkdir -p ${APP_DIR}/instance
 mkdir -p ${APP_DIR}/files
 mkdir -p ${APP_DIR}/logs
 
@@ -284,10 +291,15 @@ mkdir -p ${APP_DIR}/logs
 print_step "复制项目文件..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 复制必要文件 (根据当前项目结构调整)
-cp ${SCRIPT_DIR}/app.py ${APP_DIR}/
-cp ${SCRIPT_DIR}/requirements.txt ${APP_DIR}/
-cp ${SCRIPT_DIR}/LICENSE ${APP_DIR}/ 2>/dev/null || true
+# 如果脚本所在目录就是安装目录，则跳过复制，避免 cp 同一文件错误
+if [ "$SCRIPT_DIR" == "$APP_DIR" ]; then
+    print_info "当前已在目标目录中，跳过文件复制。"
+else
+    # 复制必要文件 (根据当前项目结构调整)
+    cp ${SCRIPT_DIR}/app.py ${APP_DIR}/
+    cp ${SCRIPT_DIR}/requirements.txt ${APP_DIR}/
+    cp ${SCRIPT_DIR}/LICENSE ${APP_DIR}/ 2>/dev/null || true
+fi
 
 # 5. 创建虚拟环境并安装依赖
 print_step "创建Python虚拟环境并安装依赖 (使用清华镜像源)..."
@@ -310,7 +322,7 @@ ADMIN_PASSWORD=${ADMIN_PASS}
 PORT=${APP_PORT}
 HOST=0.0.0.0
 FILE_EXPIRE_MINUTES=20
-DATABASE_URL=sqlite:///instance/data.db
+DATABASE_URL=sqlite:///data.db
 UPLOAD_FOLDER=files
 EOF
 
