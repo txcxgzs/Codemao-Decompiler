@@ -1711,7 +1711,11 @@ def cleanup_expired_files():
 
 with app.app_context():
     db.create_all()
-    if not AdminUser.query.first():
+    existing_admin = AdminUser.query.filter_by(username=app.config['ADMIN_USERNAME']).first()
+    if existing_admin:
+        existing_admin.set_password(app.config['ADMIN_PASSWORD'])
+        db.session.commit()
+    else:
         admin = AdminUser(username=app.config['ADMIN_USERNAME'])
         admin.set_password(app.config['ADMIN_PASSWORD'])
         db.session.add(admin); db.session.commit()
